@@ -1,0 +1,58 @@
+# Environment — NEVER commit
+.env
+.env.local
+.env.production
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+
+# Node.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Rust
+target/
+
+# Docker
+*.log
+
+# SSL certificates (never commit)
+infra/nginx/ssl/
+
+# Secrets
+*.pem
+*.key
+*.crt
+secrets/
+credentials.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# Evidence (never commit forensic data)
+evidence/
+*.pcap
+*.mem
