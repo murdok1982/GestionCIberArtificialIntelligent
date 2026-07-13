@@ -7,7 +7,6 @@ from typing import Optional
 import stripe
 
 from apps.api.database import get_db
-from apps.api.middleware.auth import get_current_user
 from apps.api.core.rbac import require_permission
 from apps.api.models.subscription import Subscription, SubscriptionStatus
 from apps.api.models.tenant import Tenant
@@ -164,8 +163,8 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         )
     except stripe.error.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid Stripe signature")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
 
     async with __import__("apps.api.database", fromlist=["AsyncSessionLocal"]).AsyncSessionLocal() as db:
         await billing_agent.handle_stripe_webhook(event["type"], event["data"], db)

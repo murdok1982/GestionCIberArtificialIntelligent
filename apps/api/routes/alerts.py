@@ -1,16 +1,20 @@
 import uuid
+import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from pydantic import BaseModel
 from typing import Optional
 
 from apps.api.database import get_db
-from apps.api.middleware.auth import get_current_user
 from apps.api.core.rbac import require_permission
+from apps.api.core.request import client_ip
 from apps.api.models.alert import Alert, AlertStatus
 from apps.api.models.user import User
+from apps.api.services.command_service import CommandService
+from apps.api.services.audit_service import AuditService
+from apps.api.models.audit import AuditCategory
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
@@ -32,8 +36,8 @@ class ActionApproval(BaseModel):
 async def list_alerts(
     severity: Optional[str] = None,
     status_filter: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(require_permission("alerts:read")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -85,38 +89,59 @@ async def approve_remote_action(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(require_permission("actions:approve")),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
     """
     Approve or reject a pending remote action on an endpoint.
-    Requires explicit justification. All approvals are audit-logged.
+    Requires explicit justification. Approved actions are dispatched as commands
+    to the endpoint's collector and audit-logged.
     """
     alert = await _get_alert_or_404(alert_id, current_user.tenant_id, db)
 
-    if not alert.requires_approval or not alert.pending_action:
-        raise HTTPException(status_code=400, detail="No pending action for this alert")
+    if not alert.requires_approval:
+        raise HTTPException(status_code=400, detail="This alert does not require action approval")
 
-    import logging
     logger = logging.getLogger(__name__)
 
     if approval.approved:
+        command = await CommandService().enqueue(
+            db,
+            tenant_id=current_user.tenant_id,
+            device_id=alert.device_id,
+            action_type=approval.action_type,
+            params=approval.params,
+            requested_by=current_user.id,
+            justification=approval.justification,
+            auto_triggered=False,
+        )
         logger.warning(
             f"ACTION APPROVED: alert={alert_id} action={approval.action_type} "
-            f"by={current_user.id} justification={approval.justification}"
+            f"command={command.id} by={current_user.id}"
         )
         alert.auto_action_taken = True
         alert.pending_action = None
         alert.status = AlertStatus.investigating
-        background_tasks.add_task(
-            _execute_approved_action,
-            str(alert.device_id),
-            approval.action_type,
-            approval.params,
-            str(current_user.id),
+        await AuditService().record(
+            db, category=AuditCategory.command, action="action_approved",
+            user_id=current_user.id, tenant_id=current_user.tenant_id,
+            detail={
+                "alert_id": str(alert.id),
+                "command_id": str(command.id),
+                "action_type": approval.action_type,
+                "justification": approval.justification,
+            },
+            ip_address=client_ip(request) if request else None,
         )
-        return {"status": "approved", "action": approval.action_type}
+        return {"status": "approved", "action": approval.action_type, "command_id": str(command.id)}
     else:
         logger.info(f"ACTION REJECTED: alert={alert_id} by={current_user.id}")
         alert.pending_action = None
+        await AuditService().record(
+            db, category=AuditCategory.command, action="action_rejected",
+            user_id=current_user.id, tenant_id=current_user.tenant_id,
+            detail={"alert_id": str(alert.id), "action_type": approval.action_type},
+            ip_address=client_ip(request) if request else None,
+        )
         return {"status": "rejected"}
 
 
@@ -128,7 +153,7 @@ async def trigger_llm_analysis(
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger fresh Gemma LLM analysis for an alert."""
-    alert = await _get_alert_or_404(alert_id, current_user.tenant_id, db)
+    await _get_alert_or_404(alert_id, current_user.tenant_id, db)
     background_tasks.add_task(_run_llm_analysis, str(alert_id))
     return {"status": "analysis_queued", "alert_id": str(alert_id)}
 

@@ -4,9 +4,7 @@ Manages evidence acquisition, hashing, timeline generation, and artifact analysi
 """
 import uuid
 import logging
-import io
 from datetime import datetime, timezone
-from typing import BinaryIO
 import boto3
 from botocore.exceptions import ClientError
 from apps.api.config import settings
@@ -98,9 +96,8 @@ class ForensicAgent:
         """
         from sqlalchemy import select
         from apps.api.models.event import Event
-        from apps.api.models.evidence import Evidence
 
-        events_result = await db.execute(
+        await db.execute(
             select(Event).where(Event.id == alert_id)
         )
 

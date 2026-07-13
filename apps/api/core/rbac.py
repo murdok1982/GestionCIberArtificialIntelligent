@@ -1,5 +1,3 @@
-from functools import wraps
-from typing import Callable
 from fastapi import Depends, HTTPException, status
 from apps.api.middleware.auth import get_current_user
 from apps.api.models.user import UserRole
@@ -13,7 +11,7 @@ PERMISSIONS: dict[str, list[str]] = {
         "forensics:read", "forensics:create", "forensics:update",
         "threat_intel:read", "threat_intel:create",
         "users:read", "users:create", "users:update",
-        "billing:read",
+        "billing:read", "billing:write",
         "actions:approve",
     ],
     UserRole.analyst: [

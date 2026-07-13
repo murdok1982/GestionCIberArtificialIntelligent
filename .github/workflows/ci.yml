@@ -46,7 +46,9 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r apps/api/requirements.txt
+        run: |
+          pip install -r apps/api/requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
 
       - name: Run linter (ruff)
         run: |
@@ -57,15 +59,19 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://cyberguard:testpassword@localhost:5432/cyberguard_test
           REDIS_URL: redis://localhost:6379/0
-          SECRET_KEY: test-secret-key-not-for-production
+          JWT_PRIVATE_KEY: ${{ secrets.JWT_PRIVATE_KEY }}
+          JWT_PUBLIC_KEY: ${{ secrets.JWT_PUBLIC_KEY }}
           STRIPE_SECRET_KEY: sk_test_dummy
           STRIPE_WEBHOOK_SECRET: whsec_dummy
           GEMMA_API_URL: http://localhost:11434
           S3_ENDPOINT: http://localhost:9000
-          CUSTODY_HMAC_KEY: test-hmac-key
+          CUSTODY_HMAC_KEY: test-hmac-key-minimum-32-bytes-long
+          ENVIRONMENT: test
         run: |
           cd apps/api
-          python -m pytest tests/ -v --tb=short 2>/dev/null || echo "No tests yet — add to apps/api/tests/"
+          python -m pytest tests/ -v --tb=short \
+            --cov=apps.api.services.command_service --cov=apps.api.services.audit_service \
+            --cov-report=term-missing --cov-fail-under=80
 
   # ──────────────────────────────────────────────
   # Frontend Tests / Build
@@ -187,6 +193,9 @@ jobs:
     needs: [build-push]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
 
     steps:
       - name: Deploy via SSH
@@ -199,6 +208,6 @@ jobs:
             cd /opt/cyberguard
             docker compose pull
             docker compose up -d --remove-orphans
-            docker compose exec api alembic upgrade head
+            docker compose exec -T api alembic upgrade head
             docker system prune -f
             echo "Deploy complete: $(date)"

@@ -1,9 +1,6 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from typing import Optional
 
-from apps.api.database import get_db
-from apps.api.middleware.auth import get_current_user
 from apps.api.core.rbac import require_permission
 from apps.api.models.user import User
 from apps.api.agents.threat_intel_agent import ThreatIntelAgent

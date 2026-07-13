@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -33,12 +33,12 @@ class Alert(Base):
     auto_action_taken: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     pending_action: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
-    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="alerts")
-    device: Mapped["Device"] = relationship("Device", back_populates="alerts")
-    event: Mapped["Event | None"] = relationship("Event", back_populates="alert")
-    assigned_user: Mapped["User | None"] = relationship("User", back_populates="assigned_alerts", foreign_keys=[assigned_to])
-    evidence: Mapped[list["Evidence"]] = relationship("Evidence", back_populates="alert")
+    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="alerts")  # noqa: F821
+    device: Mapped["Device"] = relationship("Device", back_populates="alerts")  # noqa: F821
+    event: Mapped["Event | None"] = relationship("Event", back_populates="alert")  # noqa: F821
+    assigned_user: Mapped["User | None"] = relationship("User", back_populates="assigned_alerts", foreign_keys=[assigned_to])  # noqa: F821
+    evidence: Mapped[list["Evidence"]] = relationship("Evidence", back_populates="alert")  # noqa: F821

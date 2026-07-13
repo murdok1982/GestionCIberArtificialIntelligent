@@ -19,17 +19,11 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   setUser: (user, accessToken, refreshToken) => {
     setAccessToken(accessToken);
-    if (typeof window !== "undefined") {
-      localStorage.setItem("cg_refresh_token", refreshToken);
-    }
     set({ user, isAuthenticated: !!user, isLoading: false });
   },
 
   logout: () => {
     setAccessToken(null);
-    if (typeof window !== "undefined") {
-      localStorage.removeItem("cg_refresh_token");
-    }
     set({ user: null, isAuthenticated: false, isLoading: false });
   },
 

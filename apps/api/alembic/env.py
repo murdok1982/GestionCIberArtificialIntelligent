@@ -14,8 +14,8 @@ database_url = os.getenv("DATABASE_URL", "").replace("postgresql+asyncpg", "post
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
-from apps.api.database import Base
-from apps.api.models import *  # noqa: import all models
+from apps.api.database import Base  # noqa: E402
+from apps.api.models import *  # noqa: E402, F403
 
 target_metadata = Base.metadata
 

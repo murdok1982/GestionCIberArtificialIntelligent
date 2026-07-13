@@ -1,9 +1,11 @@
 import uuid
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+import re
+import pyotp
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from apps.api.database import get_db
 from apps.api.models.user import User, UserRole
@@ -13,8 +15,11 @@ from apps.api.core.security import (
     create_access_token, create_refresh_token, verify_token, get_token_jti,
 )
 from apps.api.core.redis_client import get_redis
+from apps.api.core.request import client_ip
 from apps.api.middleware.auth import get_current_user
 from apps.api.config import settings
+from apps.api.services.audit_service import AuditService
+from apps.api.models.audit import AuditCategory, AuditSeverity
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -37,21 +42,21 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    mfa_code: str | None = None
 
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     user: dict
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str | None = None
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str | None = None
 
 
 def _slug(name: str) -> str:
@@ -67,8 +72,37 @@ def _refresh_whitelist_key(jti: str) -> str:
     return f"rt_whitelist:{jti}"
 
 
+def _validate_password_strength(password: str) -> None:
+    if len(password) < 12:
+        raise HTTPException(status_code=422, detail="Password must be at least 12 characters long")
+    if not re.search(r"[A-Z]", password):
+        raise HTTPException(status_code=422, detail="Password must contain at least one uppercase letter")
+    if not re.search(r"[a-z]", password):
+        raise HTTPException(status_code=422, detail="Password must contain at least one lowercase letter")
+    if not re.search(r"\d", password):
+        raise HTTPException(status_code=422, detail="Password must contain at least one number")
+    if not re.search(r"[^A-Za-z0-9]", password):
+        raise HTTPException(status_code=422, detail="Password must contain at least one special character")
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    secure_cookie = settings.COOKIE_SECURE or settings.ENVIRONMENT.lower() == "production"
+    response.set_cookie(
+        key=settings.REFRESH_COOKIE_NAME,
+        value=refresh_token,
+        httponly=True,
+        secure=secure_cookie,
+        samesite=settings.COOKIE_SAMESITE,
+        max_age=_REFRESH_TTL_SECONDS,
+        path="/api/v1/auth",
+        domain=settings.COOKIE_DOMAIN or None,
+    )
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(data: RegisterRequest, response: Response, db: AsyncSession = Depends(get_db)):
+    _validate_password_strength(data.password)
+
     existing = await db.execute(select(User).where(User.email == data.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -97,6 +131,12 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.flush()
 
+    await AuditService().record(
+        db, category=AuditCategory.auth, action="register",
+        user_id=user.id, tenant_id=tenant.id,
+        detail={"company": data.company_name},
+    )
+
     token_payload = {
         "sub": str(user.id),
         "tenant_id": str(tenant.id),
@@ -104,6 +144,7 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     }
 
     refresh_token, jti = create_refresh_token(token_payload)
+    _set_refresh_cookie(response, refresh_token)
 
     redis = await get_redis()
     await redis.setex(_refresh_whitelist_key(jti), _REFRESH_TTL_SECONDS, str(user.id))
@@ -117,15 +158,82 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     }
 
 
+class MfaEnableRequest(BaseModel):
+    pass
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=8)
+
+
+class MfaDisableRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=8)
+
+
+@router.post("/mfa/enable", status_code=status.HTTP_200_OK)
+async def mfa_enable(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Generate a TOTP secret. MFA is enabled only after confirming a valid code."""
+    secret = pyotp.random_base32()
+    current_user.mfa_secret = secret
+    await db.flush()
+    otpauth_url = pyotp.TOTP(secret).provisioning_uri(
+        name=current_user.email, issuer_name="CyberGuard"
+    )
+    return {"secret": secret, "otpauth_url": otpauth_url, "mfa_enabled": current_user.mfa_enabled}
+
+
+@router.post("/mfa/confirm", status_code=status.HTTP_200_OK)
+async def mfa_confirm(
+    data: MfaConfirmRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enable MFA after verifying a TOTP code."""
+    if not current_user.mfa_secret or not pyotp.TOTP(current_user.mfa_secret).verify(data.code, valid_window=1):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA code")
+    current_user.mfa_enabled = True
+    await AuditService().record(
+        db, category=AuditCategory.auth, action="mfa_enabled",
+        user_id=current_user.id, tenant_id=current_user.tenant_id,
+    )
+    return {"mfa_enabled": True}
+
+
+@router.post("/mfa/disable", status_code=status.HTTP_200_OK)
+async def mfa_disable(
+    data: MfaDisableRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disable MFA after verifying a TOTP code."""
+    if not current_user.mfa_enabled or not current_user.mfa_secret:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MFA is not enabled")
+    if not pyotp.TOTP(current_user.mfa_secret).verify(data.code, valid_window=1):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA code")
+    current_user.mfa_enabled = False
+    current_user.mfa_secret = None
+    await AuditService().record(
+        db, category=AuditCategory.auth, action="mfa_disabled",
+        user_id=current_user.id, tenant_id=current_user.tenant_id,
+    )
+    return {"mfa_enabled": False}
+
+
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(data: LoginRequest, response: Response, request: Request, db: AsyncSession = Depends(get_db)):
     redis = await get_redis()
     lockout_key = _lockout_key(data.email)
+    audit = AuditService()
+    ip = client_ip(request)
 
     # ALTA-01: Check if account is locked out
     failed_count = await redis.get(lockout_key)
     if failed_count and int(failed_count) >= _MAX_FAILED_ATTEMPTS:
         ttl = await redis.ttl(lockout_key)
+        await audit.record(
+            db, category=AuditCategory.auth, action="login_locked_out",
+            severity=AuditSeverity.warning, detail={"email": data.email}, ip_address=ip,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Account temporarily locked. Try again in {ttl} seconds.",
@@ -133,7 +241,7 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         )
 
     result = await db.execute(
-        select(User).where(User.email == data.email, User.is_active == True)
+        select(User).where(User.email == data.email, User.is_active)
     )
     user = result.scalar_one_or_none()
 
@@ -143,15 +251,39 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         pipe.incr(lockout_key)
         pipe.expire(lockout_key, _ATTEMPT_WINDOW_SECONDS)
         await pipe.execute()
+        await audit.record(
+            db, category=AuditCategory.auth, action="login_failed",
+            severity=AuditSeverity.warning,
+            detail={"email": data.email, "reason": "invalid_credentials"},
+            ip_address=ip,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
+    # MFA (TOTP) verification when enabled
+    if user.mfa_enabled:
+        if not data.mfa_code or not user.mfa_secret or not pyotp.TOTP(user.mfa_secret).verify(data.mfa_code, valid_window=1):
+            await audit.record(
+                db, category=AuditCategory.auth, action="login_mfa_failed",
+                severity=AuditSeverity.warning, user_id=user.id, tenant_id=user.tenant_id,
+                detail={"email": data.email}, ip_address=ip,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing MFA code",
+            )
+
     # Successful login — clear lockout counter
     await redis.delete(lockout_key)
 
-    user.last_login = datetime.utcnow()
+    await audit.record(
+        db, category=AuditCategory.auth, action="login_success",
+        user_id=user.id, tenant_id=user.tenant_id, ip_address=ip,
+    )
+
+    user.last_login = datetime.now(timezone.utc)
 
     token_payload = {
         "sub": str(user.id),
@@ -160,6 +292,7 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     }
 
     refresh_token, jti = create_refresh_token(token_payload)
+    _set_refresh_cookie(response, refresh_token)
 
     # ALTA-04: Whitelist new refresh token JTI in Redis
     await redis.setex(_refresh_whitelist_key(jti), _REFRESH_TTL_SECONDS, str(user.id))
@@ -179,14 +312,25 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/refresh")
-async def refresh_token_endpoint(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh_token_endpoint(
+    response: Response,
+    request: Request,
+    data: RefreshRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    refresh_token = data.refresh_token if data else None
+    if not refresh_token:
+        refresh_token = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+    if not refresh_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing refresh token")
+
     try:
-        token_data = verify_token(data.refresh_token, "refresh")
+        token_data = verify_token(refresh_token, "refresh")
     except ValueError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
     # ALTA-04: Verify JTI is in whitelist (not used/revoked)
-    jti = get_token_jti(data.refresh_token)
+    jti = get_token_jti(refresh_token)
     if not jti:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
@@ -200,7 +344,7 @@ async def refresh_token_endpoint(data: RefreshRequest, db: AsyncSession = Depend
         )
 
     result = await db.execute(
-        select(User).where(User.id == uuid.UUID(token_data.user_id), User.is_active == True)
+        select(User).where(User.id == uuid.UUID(token_data.user_id), User.is_active)
     )
     user = result.scalar_one_or_none()
     if not user:
@@ -218,21 +362,34 @@ async def refresh_token_endpoint(data: RefreshRequest, db: AsyncSession = Depend
 
     new_refresh_token, new_jti = create_refresh_token(token_payload)
     await redis.setex(_refresh_whitelist_key(new_jti), _REFRESH_TTL_SECONDS, str(user.id))
+    _set_refresh_cookie(response, new_refresh_token)
 
     return {
         "access_token": create_access_token(token_payload),
-        "refresh_token": new_refresh_token,
         "token_type": "bearer",
     }
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(data: LogoutRequest):
+async def logout(response: Response, request: Request, data: LogoutRequest | None = None, db: AsyncSession = Depends(get_db), current_user: User | None = Depends(get_current_user)):
     """Revoke the refresh token by removing its JTI from the whitelist."""
-    jti = get_token_jti(data.refresh_token)
+    if current_user is not None:
+        await AuditService().record(
+            db, category=AuditCategory.auth, action="logout",
+            user_id=current_user.id, tenant_id=current_user.tenant_id, ip_address=client_ip(request),
+        )
+    refresh_token = data.refresh_token if data else None
+    if not refresh_token:
+        refresh_token = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+    jti = get_token_jti(refresh_token) if refresh_token else None
     if jti:
         redis = await get_redis()
         await redis.delete(_refresh_whitelist_key(jti))
+    response.delete_cookie(
+        key=settings.REFRESH_COOKIE_NAME,
+        path="/api/v1/auth",
+        domain=settings.COOKIE_DOMAIN or None,
+    )
 
 
 @router.get("/me")

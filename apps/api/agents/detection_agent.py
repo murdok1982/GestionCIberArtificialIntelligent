@@ -5,7 +5,6 @@ Analyzes telemetry data applying Sigma-like rules and anomaly detection.
 import re
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +32,8 @@ SIGMA_RULES = [
         "description": "Multiple failed SSH authentication attempts detected",
         "condition": lambda e: (
             e.get("event_type") == "auth_log" and
-            len([l for l in e.get("raw_data", {}).get("log_entries", [])
-                 if "Failed password" in l or "authentication failure" in l]) >= 5
+            len([line for line in e.get("raw_data", {}).get("log_entries", [])
+                 if "Failed password" in line or "authentication failure" in line]) >= 5
         ),
     },
     {

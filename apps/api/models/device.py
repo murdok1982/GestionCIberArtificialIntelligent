@@ -1,6 +1,6 @@
 import uuid
-from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, Text
+from datetime import datetime, timezone
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from apps.api.database import Base
@@ -34,11 +34,14 @@ class Device(Base):
     status: Mapped[DeviceStatus] = mapped_column(SAEnum(DeviceStatus), default=DeviceStatus.offline, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    # One-time enrollment setup code (hashed)
+    enrollment_code_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    enrollment_code_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
-    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="devices")
-    events: Mapped[list["Event"]] = relationship("Event", back_populates="device", cascade="all, delete-orphan")
-    alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="device")
-    evidence: Mapped[list["Evidence"]] = relationship("Evidence", back_populates="device")
+    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="devices")  # noqa: F821
+    events: Mapped[list["Event"]] = relationship("Event", back_populates="device", cascade="all, delete-orphan")  # noqa: F821
+    alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="device")  # noqa: F821
+    evidence: Mapped[list["Evidence"]] = relationship("Evidence", back_populates="device")  # noqa: F821

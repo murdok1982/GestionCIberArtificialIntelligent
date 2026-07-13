@@ -22,7 +22,7 @@ class BillingAgent:
 
     async def handle_stripe_webhook(self, event_type: str, event_data: dict, db) -> None:
         """Handle Stripe webhook events."""
-        from sqlalchemy import select, update
+        from sqlalchemy import select
         from apps.api.models.subscription import Subscription, SubscriptionStatus
         from apps.api.models.tenant import Tenant
         from datetime import datetime
@@ -71,7 +71,7 @@ class BillingAgent:
         result = await db.execute(
             select(func.count(Device.id)).where(
                 Device.tenant_id == tenant_id,
-                Device.is_active == True,
+                Device.is_active,
             )
         )
         return result.scalar() or 0

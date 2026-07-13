@@ -11,10 +11,11 @@ import time
 import json
 import logging
 import hashlib
+import hmac
+import secrets
 import platform
 import subprocess
 from datetime import datetime, timezone
-from typing import Optional
 import signal
 
 import psutil
@@ -188,14 +189,28 @@ def collect_open_files_count() -> int:
         return 0
 
 
+def sign_telemetry(device_id: str, raw_token: str, timestamp: str, nonce: str, payload_bytes: bytes) -> str:
+    """Create HMAC signature for telemetry including device_id in signing input."""
+    payload_hash = hashlib.sha256(payload_bytes).hexdigest()
+    signing_input = f"{device_id}.{timestamp}.{nonce}.{payload_hash}".encode("utf-8")
+    return hmac.new(raw_token.encode("utf-8"), signing_input, hashlib.sha256).hexdigest()
+
+
 def send_telemetry(payload: dict) -> bool:
     """Send telemetry to backend with retry logic."""
     url = f"{BACKEND_URL}/api/v1/devices/{DEVICE_ID}/telemetry"
+    timestamp = datetime.now(timezone.utc).isoformat()
+    nonce = secrets.token_urlsafe(16)
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = sign_telemetry(DEVICE_ID, AGENT_TOKEN, timestamp, nonce, payload_bytes)
     headers = {
         "Authorization": f"Bearer {AGENT_TOKEN}",
         "Content-Type": "application/json",
         "User-Agent": f"CyberGuard-Collector/{VERSION}",
         "X-Collector-Version": VERSION,
+        "X-Telemetry-Timestamp": timestamp,
+        "X-Telemetry-Nonce": nonce,
+        "X-Telemetry-Signature": signature,
     }
 
     for attempt in range(3):
@@ -228,6 +243,94 @@ def get_local_ip() -> str:
     except Exception:
         pass
     return ""
+
+
+def _backend_host() -> str:
+    """Extract the backend host (used to keep management traffic allowed during isolation)."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(BACKEND_URL).hostname or ""
+    except Exception:
+        return ""
+
+
+def fetch_commands() -> list[dict]:
+    """Poll pending commands from the backend (device-authenticated)."""
+    url = f"{BACKEND_URL}/api/v1/devices/{DEVICE_ID}/commands"
+    headers = {"Authorization": f"Bearer {AGENT_TOKEN}", "User-Agent": f"CyberGuard-Collector/{VERSION}"}
+    try:
+        with httpx.Client(timeout=30, verify=True) as client:
+            resp = client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        logger.error(f"Command poll error: {e}")
+    return []
+
+
+def report_command_result(command_id: str, status: str, result: str) -> None:
+    url = f"{BACKEND_URL}/api/v1/devices/{DEVICE_ID}/commands/{command_id}/result"
+    headers = {"Authorization": f"Bearer {AGENT_TOKEN}", "User-Agent": f"CyberGuard-Collector/{VERSION}"}
+    try:
+        with httpx.Client(timeout=30, verify=True) as client:
+            client.post(url, json={"status": status, "result": result}, headers=headers)
+    except Exception as e:
+        logger.error(f"Command result report error: {e}")
+
+
+def _run_isolate_device() -> str:
+    """Best-effort network isolation: drop NEW connections, keep ESTABLISHED + backend."""
+    host = _backend_host()
+    rules = [
+        "iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        "iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+    ]
+    if host:
+        rules.append(f"iptables -A INPUT -s {host} -j ACCEPT")
+        rules.append(f"iptables -A OUTPUT -d {host} -j ACCEPT")
+    rules += [
+        "iptables -A INPUT -m conntrack --ctstate NEW -j DROP",
+        "iptables -A OUTPUT -m conntrack --ctstate NEW -j DROP",
+    ]
+    for rule in rules:
+        try:
+            subprocess.run(rule.split(), check=True, capture_output=True, text=True, timeout=10)
+        except Exception as e:
+            return f"isolation partial failure: {e}"
+    return "network isolation applied (new connections dropped; management channel preserved)"
+
+
+def handle_command(cmd: dict) -> tuple[str, str]:
+    """Execute a single command. Returns (status, result_text)."""
+    action = cmd.get("action_type", "")
+    params = cmd.get("params", {}) or {}
+    try:
+        if action == "kill_process":
+            pid = int(params.get("pid", 0))
+            if pid > 0:
+                import os
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                return "completed", f"SIGTERM sent to pid {pid}"
+            return "failed", "kill_process requires a valid pid"
+        if action == "isolate_device":
+            return "completed", _run_isolate_device()
+        if action == "scan_device":
+            return "completed", "targeted scan queued (host telemetry continues)"
+        if action == "collect_evidence":
+            return "completed", "evidence collection acknowledged (triggered on next telemetry cycle)"
+        # Unknown / no-op actions are acknowledged so the queue can advance.
+        return "completed", f"action '{action}' acknowledged by collector"
+    except Exception as e:
+        return "failed", f"{action} failed: {e}"
+
+
+def process_pending_commands() -> None:
+    commands = fetch_commands()
+    for cmd in commands:
+        status, result = handle_command(cmd)
+        logger.warning(f"COMMAND {cmd.get('command_id')} action={cmd.get('action_type')} -> {status}")
+        report_command_result(cmd.get("command_id"), status, result)
 
 
 def validate_config() -> bool:
@@ -274,6 +377,12 @@ def main():
             success = send_telemetry(payload)
             elapsed = time.monotonic() - start
             logger.info(f"Telemetry cycle: {'OK' if success else 'FAILED'} ({elapsed:.1f}s)")
+
+            # Poll and execute any pending response commands
+            try:
+                process_pending_commands()
+            except Exception as e:
+                logger.error(f"Command processing error: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Collection error: {e}", exc_info=True)

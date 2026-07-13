@@ -8,15 +8,40 @@ Central coordinator of the multi-agent system.
 """
 import uuid
 import logging
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Protocol
 from dataclasses import dataclass, field
 from enum import Enum
 
-from apps.api.agents.detection_agent import DetectionAgent
-from apps.api.agents.threat_intel_agent import ThreatIntelAgent
-from apps.api.agents.forensic_agent import ForensicAgent
-from apps.api.agents.custody_agent import CustodyAgent
+
+# Agent protocols for DI
+class DetectionAgentProtocol(Protocol):
+    async def analyze_telemetry(self, event_data: dict) -> list: ...
+
+
+class ThreatIntelAgentProtocol(Protocol):
+    async def enrich_iocs(self, iocs: list[dict]) -> dict: ...
+
+
+class ForensicAgentProtocol(Protocol):
+    async def store_evidence(
+        self,
+        tenant_id: uuid.UUID,
+        device_id: uuid.UUID,
+        evidence_id: uuid.UUID,
+        filename: str,
+        file_data: bytes,
+        evidence_type: str,
+    ) -> tuple[str, str, str]: ...
+
+
+class CustodyAgentProtocol(Protocol):
+    async def sign_record(self, record_data: str) -> str: ...
+
+
+class LLMServiceProtocol(Protocol):
+    async def analyze_security_event(self, data: dict) -> dict: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +65,7 @@ class RemoteAction:
     risk_level: str
     requires_approval: bool = True
     auto_approved: bool = False
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -73,11 +98,19 @@ class OrchestratorAgent:
         "backup_deletion",
     }
 
-    def __init__(self):
-        self.detection_agent = DetectionAgent()
-        self.threat_intel_agent = ThreatIntelAgent()
-        self.forensic_agent = ForensicAgent()
-        self.custody_agent = CustodyAgent()
+    def __init__(
+        self,
+        detection_agent: DetectionAgentProtocol,
+        threat_intel_agent: ThreatIntelAgentProtocol,
+        forensic_agent: ForensicAgentProtocol,
+        custody_agent: CustodyAgentProtocol,
+        llm_service: LLMServiceProtocol,
+    ):
+        self.detection_agent = detection_agent
+        self.threat_intel_agent = threat_intel_agent
+        self.forensic_agent = forensic_agent
+        self.custody_agent = custody_agent
+        self.llm_service = llm_service
 
     async def process_event(self, event_data: dict, db) -> AgentDecision:
         """
@@ -88,9 +121,6 @@ class OrchestratorAgent:
         4. Trigger LLM analysis for medium+ severity
         5. Decide on actions
         """
-        from apps.api.services.event_service import EventService
-        from apps.api.services.llm_service import GemmaAnalystService
-
         logger.info(f"Orchestrator processing event type={event_data.get('event_type')} device={event_data.get('device_id')}")
 
         # Step 1: Detection
@@ -121,8 +151,7 @@ class OrchestratorAgent:
         # Step 3: LLM analysis for high/critical
         llm_analysis = None
         if max_severity in ("high", "critical") or is_imminent:
-            llm_service = GemmaAnalystService()
-            llm_analysis = await llm_service.analyze_security_event({
+            llm_analysis = await self.llm_service.analyze_security_event({
                 "event": event_data,
                 "detections": detections,
                 "threat_intel": threat_intel_data,
@@ -165,7 +194,7 @@ class OrchestratorAgent:
         - Active credential dumping with outbound C2 traffic
         - Mass file operations combined with process injection
         """
-        event_type = event_data.get("event_type", "")
+        event_data.get("event_type", "")
         detection_types = {d.get("rule_id", "") for d in detections}
 
         if any(indicator in detection_types for indicator in self.IMMINENT_DANGER_INDICATORS):

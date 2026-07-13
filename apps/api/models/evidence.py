@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, BigInteger, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -35,12 +35,12 @@ class Evidence(Base):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     acquired_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # Relationships
-    tenant: Mapped["Tenant"] = relationship("Tenant")
-    device: Mapped["Device"] = relationship("Device", back_populates="evidence")
-    alert: Mapped["Alert | None"] = relationship("Alert", back_populates="evidence")
-    acquired_by_user: Mapped["User"] = relationship("User", back_populates="acquired_evidence")
-    custody_chain: Mapped[list["CustodyChain"]] = relationship("CustodyChain", back_populates="evidence", order_by="CustodyChain.performed_at")
+    tenant: Mapped["Tenant"] = relationship("Tenant")  # noqa: F821
+    device: Mapped["Device"] = relationship("Device", back_populates="evidence")  # noqa: F821
+    alert: Mapped["Alert | None"] = relationship("Alert", back_populates="evidence")  # noqa: F821
+    acquired_by_user: Mapped["User"] = relationship("User", back_populates="acquired_evidence")  # noqa: F821
+    custody_chain: Mapped[list["CustodyChain"]] = relationship("CustodyChain", back_populates="evidence", order_by="CustodyChain.performed_at")  # noqa: F821

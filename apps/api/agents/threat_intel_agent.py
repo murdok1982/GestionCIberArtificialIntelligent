@@ -5,8 +5,7 @@ Uses Redis cache to avoid redundant API calls.
 """
 import json
 import logging
-import hashlib
-from typing import Any
+import ipaddress
 import httpx
 from apps.api.config import settings
 
@@ -21,6 +20,20 @@ class ThreatIntelAgent:
         self.redis = redis_client
         self.http_client = httpx.AsyncClient(timeout=10.0)
 
+    @staticmethod
+    def _is_public_ip(ip: str) -> bool:
+        """Validate IP is public and not reserved/private (SSRF protection)."""
+        try:
+            addr = ipaddress.ip_address(ip)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+                return False
+            # Block known cloud metadata IPs
+            if str(addr) in ("169.254.169.254", "169.254.170.2", "fd00:ec2::254"):
+                return False
+            return True
+        except ValueError:
+            return False
+
     async def enrich_iocs(self, iocs: list[dict]) -> dict:
         """Batch enrich a list of IOCs."""
         results = {"ips": [], "hashes": [], "domains": [], "campaigns": []}
@@ -33,6 +46,9 @@ class ThreatIntelAgent:
             seen.add(key)
 
             if ioc["type"] == "ip":
+                if not self._is_public_ip(ioc["value"]):
+                    logger.warning(f"Rejected private/reserved IP for enrichment: {ioc['value']}")
+                    continue
                 result = await self.enrich_ip(ioc["value"])
                 if result:
                     results["ips"].append(result)
@@ -53,6 +69,10 @@ class ThreatIntelAgent:
 
     async def enrich_ip(self, ip: str) -> dict | None:
         """Enrich IP via AbuseIPDB and cache result."""
+        if not self._is_public_ip(ip):
+            logger.warning(f"Refusing to enrich private/reserved IP: {ip}")
+            return None
+
         cache_key = f"threat_intel:ip:{ip}"
 
         if self.redis:

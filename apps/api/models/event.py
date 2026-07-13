@@ -1,6 +1,6 @@
 import uuid
-from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, Text, Index
+from datetime import datetime, timezone
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from apps.api.database import Base
@@ -28,12 +28,12 @@ class Event(Base):
     mitre_tactic: Mapped[str | None] = mapped_column(String(100), nullable=True)
     mitre_technique: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
     # Relationships
-    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="events")
-    device: Mapped["Device"] = relationship("Device", back_populates="events")
-    alert: Mapped["Alert | None"] = relationship("Alert", back_populates="event")
+    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="events")  # noqa: F821
+    device: Mapped["Device"] = relationship("Device", back_populates="events")  # noqa: F821
+    alert: Mapped["Alert | None"] = relationship("Alert", back_populates="event")  # noqa: F821
 
     __table_args__ = (
         Index("ix_events_tenant_created", "tenant_id", "created_at"),

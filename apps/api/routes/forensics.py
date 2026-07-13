@@ -1,15 +1,15 @@
 import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
 
 from apps.api.database import get_db
-from apps.api.middleware.auth import get_current_user
 from apps.api.core.rbac import require_permission
 from apps.api.models.evidence import Evidence, EvidenceType
+from apps.api.models.device import Device
 from apps.api.models.custody import CustodyAction
 from apps.api.models.user import User
 from apps.api.agents.forensic_agent import ForensicAgent
@@ -63,6 +63,14 @@ async def upload_evidence(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload and register evidence with automatic hashing and S3 storage."""
+    # M-5: ensure the referenced device belongs to the caller's tenant
+    if device_id:
+        dev = await db.execute(
+            select(Device).where(Device.id == device_id, Device.tenant_id == current_user.tenant_id)
+        )
+        if not dev.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Device not found")
+
     # ALTA-05: Enforce size limit by streaming rather than buffering the entire file first
     chunks: list[bytes] = []
     total = 0

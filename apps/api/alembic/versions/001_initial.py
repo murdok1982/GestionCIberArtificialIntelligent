@@ -159,10 +159,10 @@ def upgrade():
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
 
-    # Row Level Security for tenant isolation (PostgreSQL)
-    op.execute("ALTER TABLE events ENABLE ROW LEVEL SECURITY;")
-    op.execute("ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;")
-    op.execute("ALTER TABLE evidence ENABLE ROW LEVEL SECURITY;")
+    # NOTE: Tenant isolation is enforced at the application layer (every query is
+    # scoped by tenant_id). Database-level Row Level Security is intentionally NOT
+    # enabled here: enabling RLS without policies would deny all access and break
+    # the application. RLS may be added later with explicit per-tenant policies.
 
 
 def downgrade():

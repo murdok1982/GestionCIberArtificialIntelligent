@@ -11,7 +11,7 @@ export function middleware(request: NextRequest) {
     // next/font/google inlines a <style> tag — nonce required
     `style-src 'self' 'nonce-${nonce}' https://fonts.googleapis.com`,
     "img-src 'self' data:",
-    "connect-src 'self' wss:",
+    "connect-src 'self'",
     "font-src 'self' https://fonts.gstatic.com",
     "frame-ancestors 'none'",
     "base-uri 'self'",

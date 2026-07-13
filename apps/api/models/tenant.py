@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, Integer, DateTime, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -24,12 +24,12 @@ class Tenant(Base):
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     max_devices: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
-    users: Mapped[list["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
-    devices: Mapped[list["Device"]] = relationship("Device", back_populates="tenant", cascade="all, delete-orphan")
-    events: Mapped[list["Event"]] = relationship("Event", back_populates="tenant", cascade="all, delete-orphan")
-    alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="tenant", cascade="all, delete-orphan")
-    subscriptions: Mapped[list["Subscription"]] = relationship("Subscription", back_populates="tenant")
+    users: Mapped[list["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")  # noqa: F821
+    devices: Mapped[list["Device"]] = relationship("Device", back_populates="tenant", cascade="all, delete-orphan")  # noqa: F821
+    events: Mapped[list["Event"]] = relationship("Event", back_populates="tenant", cascade="all, delete-orphan")  # noqa: F821
+    alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="tenant", cascade="all, delete-orphan")  # noqa: F821
+    subscriptions: Mapped[list["Subscription"]] = relationship("Subscription", back_populates="tenant")  # noqa: F821

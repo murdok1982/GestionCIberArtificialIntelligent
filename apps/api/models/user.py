@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -26,15 +26,17 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     mfa_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failed_login_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
-    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="users")
-    assigned_alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="assigned_user", foreign_keys="Alert.assigned_to")
-    acquired_evidence: Mapped[list["Evidence"]] = relationship("Evidence", back_populates="acquired_by_user")
-    custody_actions: Mapped[list["CustodyChain"]] = relationship("CustodyChain", back_populates="performed_by_user")
+    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="users")  # noqa: F821
+    assigned_alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="assigned_user", foreign_keys="Alert.assigned_to")  # noqa: F821
+    acquired_evidence: Mapped[list["Evidence"]] = relationship("Evidence", back_populates="acquired_by_user")  # noqa: F821
+    custody_actions: Mapped[list["CustodyChain"]] = relationship("CustodyChain", back_populates="performed_by_user")  # noqa: F821
 
     class Config:
         # Composite unique constraint: email unique per tenant

@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛡️ CyberGuard AI Platform
+# 🛡️ CyberGuard AI Platform (HispanShield)
 **Sistema de Gestión de Seguridad Asistida por Inteligencia Artificial**
 
 [![Next.js](https://img.shields.io/badge/Next.js-14-black?logo=next.js)](https://nextjs.org/)
@@ -157,6 +157,89 @@ docker compose exec ollama ollama run gemma:2b
 - **💻 Dashboard SOC**: `http://localhost:3000`
 - **⚙️ Backend API Docs**: `http://localhost:8000/docs`
 - **💾 MinIO Console**: `http://localhost:9001`
+
+---
+
+## 🔐 Seguridad y Endurecimiento para Producción
+
+Esta plataforma ha sido auditada y endurecida para despliegues en producción. A
+continuación se documentan todas las mejoras aplicadas, agrupadas por prioridad.
+
+### 🔑 Criptografía y autenticación (JWT)
+
+- **Claves asimétricas RS256**: la API ya no usa una clave simétrica. Se exige un
+  par de claves RSA (`JWT_PRIVATE_KEY` / `JWT_PRIVATE_KEY_PATH` y
+  `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH`). La clave puede proporcionarse
+  como contenido PEM inline **o** como ruta a un archivo (ver `config.py`).
+- **Generación de claves**: se incluye `generate_rsa_keys.py` para crear el par de
+  forma segura. Nunca se hardcodean secrets; todo va por variables de entorno.
+- **Tokens en memoria (frontend)**: el *access token* se guarda **solo en memoria**
+  (no en `localStorage`) y el *refresh token* se entrega en una cookie
+  `HttpOnly` + `SameSite=Strict` + `Secure`. Esto mitiga robos de token por XSS.
+- **Bloqueo de cuenta**: tras 5 intentos fallidos de login (`failed_login_count` /
+  `locked_until` en `users`) la cuenta se bloquea 15 minutos. El evento se registra
+  en la auditoría.
+- **MFA (TOTP)**: login opcional con segunda factor (`pyotp`). Endpoints
+  `POST /auth/mfa/enable`, `/auth/mfa/confirm`, `/auth/mfa/disable` y verificación
+  en `POST /auth/login`.
+
+### 🛡️ Canal de respuesta a incidentes (backend → collector)
+
+El sistema ahora puede **ejecutar acciones remotas reales** en los endpoints:
+
+1. Un comando se crea (`DeviceCommand`) y se encola en Redis
+   (`device:commands:{device_id}`) de forma durable y auditable.
+2. El collector (Linux/Windows) sondea `GET /api/v1/devices/{id}/commands`,
+   ejecuta la acción (aislar equipo, matar proceso, escanear, recolectar evidencia)
+   y reporta con `POST .../commands/{id}/result`.
+3. Acciones autónomas en *peligro inminente* se despachan automáticamente;
+   el resto requiere aprobación humana explícita (`POST /alerts/{id}/approve-action`).
+
+Modelos nuevos: `DeviceCommand` y `AuditLog` (migraciones `002` y `003`).
+
+### 📜 Registro de auditoría inmutable
+
+Toda acción sensible (login, MFA, logout, despacho de comandos, aprobación/rechazo
+de acciones, subida de evidencia) queda registrada en `audit_logs` con categoría,
+severidad, IP y detalle. Servicio: `services/audit_service.py`.
+
+### 🚦 Seguridad de red y despliegue
+
+- **Swagger desactivado en producción**: `/openapi.json` y `/docs` solo están
+  disponibles fuera de `ENVIRONMENT=production`.
+- **Rate limiting**: el `location` de telemetría en nginx usa una regex válida
+  (`~* ^/api/v1/devices/[^/]+/telemetry$`) y zona propia de límites.
+- **CSP**: `middleware.ts` define `Content-Security-Policy` con `nonce` y
+  `connect-src 'self'`. No se permiten orígenes `*` en CORS.
+- **Migraciones como única fuente de esquema**: `database.init_db()` aplica
+  **solo Alembic** (sin `create_all`), garantizando un esquema consistente.
+- **Secrets obligatorios**: `docker-compose.yml` falla si faltan
+  `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MINIO_*`. `env_file` es requerido.
+- **Enrolamiento seguro**: el comando de instalación ya **no usa `curl … | bash`**;
+  descarga el script y verifica su checksum SHA-256 antes de ejecutarlo.
+- **Hardening del collector**: el servicio systemd añade `CapabilityBoundingSet` y
+  `AmbientCapabilities` mínimas (`CAP_DAC_READ_SEARCH`, `CAP_NET_ADMIN`,
+  `CAP_NET_RAW`), `NoNewPrivileges`, `ProtectSystem=strict`, etc.
+- **Gate de despliegue**: el job de deploy en CI depende de tests + escaneo de
+  seguridad + build, y usa `concurrency` para evitar despliegues solapados.
+
+### ✅ Validaciones y calidad
+
+- **Límites en listados**: `limit`/`offset` con cotas (`Alert`, `Device`).
+- **Propiedad de evidencia**: `POST /forensics/evidence` valida que el `device_id`
+  pertenezca al tenant.
+- **Timestamps timezone-aware**: todos los modelos usan `datetime.now(timezone.utc)`.
+- **Tests y cobertura**: suite en `apps/api/tests/` con compuerta de cobertura
+  (≥80%) sobre los servicios críticos nuevos (`command_service`, `audit_service`).
+- **Lint**: `ruff` en verde para `apps/api` y `collectors`.
+
+### 🧭 Puesta en marcha mínima para producción
+
+1. Genera el par RSA: `python generate_rsa_keys.py` y referencia las rutas en `.env`.
+2. Define **todas** las variables sensibles en `.env` (nunca valores por defecto).
+3. Aplica migraciones: `alembic upgrade head`.
+4. Sirve tras un proxy (nginx) con TLS; no expongas Postgres/Redis/MinIO.
+5. Despliega el dashboard de forma que llame a la API por mismo origen (`/api`).
 
 ---
 
